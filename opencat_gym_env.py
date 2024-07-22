@@ -5,7 +5,7 @@ import pybullet_data
 
 
 # Constants to define training and visualisation.
-GUI_MODE = False          # Set "True" to display pybullet in a window
+
 EPISODE_LENGTH = 250      # Number of steps for one training episode
 MAXIMUM_LENGTH = 1.8e6    # Number of total steps for entire training
 
@@ -32,7 +32,7 @@ RANDOM_MASS = 0           # Percent, currently inactive
 RANDOM_FRICTION = 0       # Percent, currently inactive
 
 LENGTH_RECENT_ANGLES = 3  # Buffer to read recent joint angles
-LENGTH_JOINT_HISTORY = 30 # Number of steps to store joint angles.
+LENGTH_JOINT_HISTORY = 4 # Number of steps to store joint angles.
 
 # Size of oberservation space is set up of: 
 # [LENGTH_JOINT_HISTORY, quaternion, gyro]
@@ -45,14 +45,14 @@ class OpenCatGymEnv(gym.Env):
 
     metadata = {'render.modes': ['human']}
 
-    def __init__(self):
+    def __init__(self, render_mode=None):
         self.step_counter = 0
         self.step_counter_session = 0
         self.state_history = np.array([])
         self.angle_history = np.array([])
         self.bound_ang = np.deg2rad(BOUND_ANG)
 
-        if GUI_MODE:
+        if render_mode=="human":
             p.connect(p.GUI)
             # Uncommend to create a video.
             #video_options = ("--width=960 --height=540 
@@ -83,11 +83,13 @@ class OpenCatGymEnv(gym.Env):
         joint_angs = np.asarray(p.getJointStates(self.robot_id, self.joint_id),
                                                    dtype=object)[:,0]
         ds = np.deg2rad(STEP_ANGLE) # Maximum change of angle per step
-        joint_angs += action * ds # Change per step including agent action
 
+        joint_angs += action * ds # Change per step including agent action
+        
         # Apply joint boundaries individually.
         min_ang = -self.bound_ang
         max_ang = self.bound_ang
+        
         joint_angs[0] = np.clip(joint_angs[0], min_ang, max_ang) # shoulder_left
         joint_angs[1] = np.clip(joint_angs[1], min_ang, max_ang) # elbow_left
         joint_angs[2] = np.clip(joint_angs[2], min_ang, max_ang) # shoulder_right
@@ -200,11 +202,22 @@ class OpenCatGymEnv(gym.Env):
                     + FAC_CLEARANCE * paw_clearance 
                     + FAC_SLIP * paw_slipping**2 
                     + FAC_ARM_CONTACT * self.arm_contact))
+        joints = np.clip(np.mean(1.0 - np.abs(action)), 1e-3, 1.0)**0.5
+        # print("actions:", )
+        forward = np.clip(movement_forward*300, 1e-3, 1.0)
+        body_stability = 1.0 - np.clip(np.linalg.norm(np.asarray(p.getBaseVelocity(self.robot_id)[1])*ANG_FACTOR), 0.0, 1.0)
+        # print("joints:", joints)
+        # print("forward:", forward)
+        # if self.__getattribute__("action_prev") is not None:
+        #     self.action_prev_prev = self.action_prev
+        #     self.action_prev = action
+        change_direction = np.mean(((np.sign(joint_angs-joint_angs_prev) == np.sign(joint_angs_prev-joint_angs_prev_prev))+ 1e-3)**0.5)**2.0
+        reward = (forward*change_direction*body_stability*joints)**(1.0/4.0)
 
         # Set state of the current state.
         terminated = False
         truncated = False
-        info = {}
+        info = {"joints": joints, "forward": forward, "change_direction": change_direction, "body_stability": body_stability}
 
         # Stop criteria of current learning episode: 
         # Number of steps or robot fell.
