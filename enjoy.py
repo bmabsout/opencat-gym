@@ -5,6 +5,7 @@ from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.env_util import make_vec_env
 from opencat_gym_env import OpenCatGymEnv
+from gymnasium.wrappers.time_limit import TimeLimit
 
 # argparse the model to load
 import argparse
@@ -15,7 +16,7 @@ args = parser.parse_args()
 # Create OpenCatGym environment from class
 print("load from:", args.model)
 parallel_env = 1
-env = make_vec_env(OpenCatGymEnv, n_envs=parallel_env, env_kwargs={"render_mode": "human"})
+env = make_vec_env(lambda **kwargs: TimeLimit(OpenCatGymEnv(**kwargs), max_episode_steps=400), n_envs=parallel_env, env_kwargs={"render_mode": "human"})
 # model = PPO.load("trained/trained_agent_PPO")
 model = PPO.load(args.model)
 

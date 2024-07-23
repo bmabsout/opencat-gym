@@ -3,6 +3,7 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from opencat_gym_env import OpenCatGymEnv
+from gymnasium.wrappers.time_limit import TimeLimit
 from stable_baselines3.common.callbacks import CheckpointCallback
 # Create OpenCatGym environment from class and check if structure is correct
 #env = OpenCatGymEnv()
@@ -11,7 +12,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 if __name__ == "__main__":
     # Set up number of parallel environments
     parallel_env = 8
-    env = make_vec_env(OpenCatGymEnv, 
+    env = make_vec_env(lambda: TimeLimit(OpenCatGymEnv(), max_episode_steps=400), 
                        n_envs=parallel_env, 
                        vec_env_cls=SubprocVecEnv)
 
