@@ -3,236 +3,161 @@ import gymnasium as gym
 import numpy as np
 import pybullet as p
 import pybullet_data
-import pybullet
-
-
-
 
 def p_mean(values, p, axis=None, slack=1e-7):
-    """ Calculate mean of values with power p.
-    """
-    array = np.asarray(values)+slack
-    return np.mean(np.abs(array)**p, axis=None)**(1.0/p)-slack
+    """Calculate mean of values with power p."""
+    array = np.asarray(values) + slack
+    return np.mean(np.abs(array)**p, axis=axis)**(1.0/p) - slack
 
 class OpenCatGymEnv(gym.Env):
-    """ Gymnasium environment (stable baselines 3) for OpenCat robots.
-    """
+    """Gymnasium environment for OpenCat robots."""
 
     metadata = {'render.modes': ['human']}
 
     def __init__(self, render_mode=None, observe_joints=False):
         self.observe_joints = observe_joints
         self.step_counter = 0
-        self.state_history = []
-        self.angle_history = np.array([])
-        # Constants to define training and visualisation.
-
-        self.BOUND_ANG = 110         # Joint maximum angle (deg)
-        self.STEP_ANGLE = 11           # Maximum angle (deg) delta per step
-        self.ANG_FACTOR = 0.1          # Improve angular velocity resolution before clip.
-
-        # Values for randomization, to improve sim to real transfer.
-        self.RANDOM_GYRO = 0           # Percent
-        self.RANDOM_JOINT_ANGS = 0      # Percent
-        self.RANDOM_MASS = 0           # Percent, currently inactive
-        self.RANDOM_FRICTION = 0       # Percent, currently inactive
-
+        
+        # Constants
+        self.BOUND_ANG = np.deg2rad(110)  # Joint maximum angle (rad)
+        self.STEP_ANGLE = np.deg2rad(11)  # Maximum angle (rad) delta per step
+        self.ANG_FACTOR = 0.1  # Improve angular velocity resolution before clip
         self.LENGTH_RECENT_ANGLES = 3  # Buffer to read recent joint angles
-        self.LENGTH_HISTORY = 4 # Number of steps to state history
+        
+        # Observation space size
+        self.SIZE_OBSERVATION = 3 + 3 + 1 + 3  # Linear vel, Angular vel, Time, Gravity Direction
+        self.TOTAL_OBSERVATION = self.SIZE_OBSERVATION + (self.LENGTH_RECENT_ANGLES * self.NUM_JOINTS if observe_joints else 0)
 
-        self.SIZE_OBSERVATION = (
-            3 # Linear velocity
-            + 3 # Angular velocity
-            + 1 # Time
-            + 4 # Quaternion
-        )
-        # self.TOTAL_OBSERVATION = SIZE_OBSERVATION*LENGTH_HISTORY
-        self.TOTAL_OBSERVATION = self.SIZE_OBSERVATION + (self.LENGTH_HISTORY*8 if observe_joints else 0)
-        self.bound_ang = np.deg2rad(self.BOUND_ANG)
-
-        if render_mode=="human":
-            p.connect(p.GUI)
-            # Uncommend to create a video.
-            #video_options = ("--width=960 --height=540 
-            #                + "--mp4=\"training.mp4\" --mp4fps=60")
-            #p.connect(p.GUI, options=video_options) 
-        else:
-            # Use for training without visualisation (significantly faster).
-            p.connect(p.DIRECT)
-
+        # Set up PyBullet
+        p.connect(p.GUI if render_mode == "human" else p.DIRECT)
+        p.configureDebugVisualizer(p.COV_ENABLE_SINGLE_STEP_RENDERING)
         p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
-        p.resetDebugVisualizerCamera(cameraDistance=0.5, 
-                                     cameraYaw=-170, 
-                                     cameraPitch=-40, 
-                                     cameraTargetPosition=[0.4,0,0])
+        p.resetDebugVisualizerCamera(cameraDistance=0.5, cameraYaw=-170, cameraPitch=-40, cameraTargetPosition=[0.4,0,0])
+        
+        p.setGravity(0, 0, -9.81)
+        p.setAdditionalSearchPath(pybullet_data.getDataPath())
+        p.loadURDF("plane.urdf")
+        
+        # Load robot URDF
+        urdf_path = pathlib.Path(__file__).parent.resolve() / "models/bittle_esp32.urdf"
+        self.robot_id = p.loadURDF(str(urdf_path), [0, 0, 0.08], p.getQuaternionFromEuler([0, 0, 0]), 
+                                   flags=p.URDF_USE_SELF_COLLISION)
+        # Initialize joints
+        def is_relevant_joint(joint_id):
+            joint_type = p.getJointInfo(self.robot_id, joint_id)[2]
+            return joint_type in (p.JOINT_PRISMATIC, p.JOINT_REVOLUTE)
 
-        # The action space are the 8 joint angles.
-        self.action_space = gym.spaces.Box(np.array([-1]*8), np.array([1]*8))
+        self.joint_ids = list(filter(is_relevant_joint, range(p.getNumJoints(self.robot_id))))
+        self.NUM_JOINTS = len(self.joint_ids)
+        
+        for j in self.joint_ids:
+            p.changeDynamics(self.robot_id, j, maxJointVelocity=np.pi*10)
 
-        high = np.ones(self.TOTAL_OBSERVATION)
-        self.observation_space = gym.spaces.Box(high = high, low = -high)
+        # Define action and observation spaces
+        action_high = np.ones(self.NUM_JOINTS)
+        self.action_space = gym.spaces.Box(-action_high, action_high)
+        obs_high = np.ones(self.TOTAL_OBSERVATION)
+        self.observation_space = gym.spaces.Box(-obs_high, obs_high)
 
-    def _get_obs(self, action):
-        quaternion = np.asarray(p.getBasePositionAndOrientation(self.robot_id)[1])
+    def gravity_direction(self, id):
+        """Calculate the direction of gravity in the box's local coordinate system."""
+        _, orientation = p.getBasePositionAndOrientation(id)
+        rotation_matrix = np.array(p.getMatrixFromQuaternion(orientation)).reshape(3, 3)
+        world_gravity = np.array([0, 0, -1])
+        local_gravity = np.dot(rotation_matrix.T, world_gravity)
+        return local_gravity / np.linalg.norm(local_gravity)
+
+    def _get_obs(self):
+        """Get the current observation."""
+        gravity_direction = self.gravity_direction(self.robot_id)
         state_vel, state_angvel = map(np.asarray, p.getBaseVelocity(self.robot_id))
-        state_vel = np.clip(state_vel, -1.0 , 1.0)
-        state_angvel_clip = np.clip(state_angvel*self.ANG_FACTOR, -1.0, 1.0)
-        joint_states = (self.recent_angles/self.bound_ang + 1.0)/2.0 if self.observe_joints else []
-        # self.state_robot = np.concatenate((state_vel, state_angvel_clip, action))
-        time_obs = np.fmod(self.step_counter/100.0, 1.0)
-        self.state_robot = np.concatenate((state_vel, state_angvel_clip, quaternion, [time_obs], joint_states))
-        # self.state_history.append(self.state_robot)
-        # obs = np.array((self.state_history[0:2] + self.state_history[2::3])[:LENGTH_HISTORY]).flatten()
-        # padded_obs = np.zeros(TOTAL_OBSERVATION)
-        # padded_obs[:len(obs)] = obs
-        # return padded_obs
-        return self.state_robot
+        state_vel = np.clip(state_vel, -1.0, 1.0)
+        state_angvel_clip = np.clip(state_angvel * self.ANG_FACTOR, -1.0, 1.0)
+        time_obs = np.fmod(self.step_counter / 100.0, 1.0)
+        
+        obs = np.concatenate((state_vel, state_angvel_clip, gravity_direction, [time_obs]))
+        
+        if self.observe_joints:
+            obs = np.concatenate((obs, self.recent_angles.flatten() / self.BOUND_ANG))
+        
+        return obs.astype(np.float32)
 
     def step(self, action):
-        self.step_counter += 1
         p.configureDebugVisualizer(p.COV_ENABLE_SINGLE_STEP_RENDERING)
+        self.step_counter += 1
+        
+        # Get current position and joint angles
         last_position = p.getBasePositionAndOrientation(self.robot_id)[0][0]
-        joint_angs = np.asarray(p.getJointStates(self.robot_id, self.joint_ids),
-                                                   dtype=object)[:,0]
-        # shoulder_left, elbow_left, shoulder_right, elbow_right, hip_right, knee_right, hip_left, knee_left
-        ds = np.deg2rad(self.STEP_ANGLE) # Maximum change of angle per step
-        joint_angs = joint_angs + np.clip(action*self.bound_ang - joint_angs, -1.0, 1.0) * ds # Change per step including agent action
-        # joint_angs = action*self.bound_ang
+        joint_angs = np.array([state[0] for state in p.getJointStates(self.robot_id, self.joint_ids)])
+        
+        # Update joint angles based on action
+        joint_angs += np.clip(action * self.BOUND_ANG - joint_angs, -1.0, 1.0) * self.STEP_ANGLE
+        joint_angs = np.clip(joint_angs, -self.BOUND_ANG, self.BOUND_ANG)
+        
+        # Round joint angles to integer degrees (as in OpenCat robot)
+        joint_angs = np.deg2rad(np.round(np.rad2deg(joint_angs)))
+        
+        # get the observation before stepping the simulation because of communication delay
+        observation = self._get_obs()
 
-        min_ang = -self.bound_ang
-        max_ang = self.bound_ang
+        # Apply new joint angles
+        p.setJointMotorControlArray(self.robot_id, self.joint_ids, p.POSITION_CONTROL, joint_angs, forces=np.ones(self.NUM_JOINTS)*0.2)
 
-        joint_angs = np.clip(joint_angs, min_ang, max_ang)
-
-        # Transform angle to degree and perform rounding, because 
-        # OpenCat robot have only integer values.
-        joint_angsDeg = np.rad2deg(joint_angs.astype(np.float64))
-        joint_angsDegRounded = joint_angsDeg.round()
-        joint_angs = np.deg2rad(joint_angsDegRounded)
-
-        # Simulate delay for data transfer. Delay has to be modeled to close 
-        # "reality gap").
-        p.stepSimulation()
-        # Set new joint angles
-        p.setJointMotorControlArray(self.robot_id, 
-                                    self.joint_ids, 
-                                    p.POSITION_CONTROL, 
-                                    joint_angs, 
-                                    forces=np.ones(8)*0.2)
-        p.stepSimulation() # Delay of data transfer
-
-        # Normalize joint_angs
-        joint_angs /= self.bound_ang
-
-        self.recent_angles = np.append(self.recent_angles, joint_angs)
-        self.recent_angles = np.delete(self.recent_angles, np.s_[0:8])
-
-        joint_angs_prev = self.recent_angles[8:16]
-        joint_angs_prev_prev = self.recent_angles[0:8]
-
-        p.stepSimulation() # Emulated delay of data transfer via serial port
+        for _ in range(5): # 5 steps so the simulation runs at 240/5 = 48Hz, we cannot go faster as PWM is 50Hz
+            p.stepSimulation() # runs at 240Hz, this is needed as pybullet is tuned for 240Hz operation
+        
+        # Update recent angles history
+        self.recent_angles = np.roll(self.recent_angles, -1, axis=0)
+        self.recent_angles[-1] = joint_angs / self.BOUND_ANG
+        
+        # Calculate reward components
         current_position = p.getBasePositionAndOrientation(self.robot_id)[0][0]
-        movement_forward = current_position - last_position
-        # joints = np.clip(np.mean(1.0 - np.abs(action)), 1e-3, 1.0)**0.5
-        forward = np.clip(movement_forward*300, 0.0, 1.0)
-        body_stability = 1.0 - np.clip(np.asarray(p.getBaseVelocity(self.robot_id)[1])*0.2, 0.0, 1.0)
+        movement_forward = np.clip((current_position - last_position) * 300, 0.0, 1.0)
+        body_stability = 1.0 - np.clip(np.asarray(p.getBaseVelocity(self.robot_id)[1]) * 0.2, 0.0, 1.0)
         body_stability_scalar = p_mean(body_stability, p=-1.0)
-        change_direction = np.sign(joint_angs-joint_angs_prev) == np.sign(joint_angs_prev-joint_angs_prev_prev)
-        change_direction_scalar = p_mean(change_direction, p=0.5)
-        reward = p_mean([forward, change_direction_scalar, body_stability_scalar], p=-4.0)
-        # Set state of the current state.
-        terminated = False
+        change_direction = np.sign(self.recent_angles[-1] - self.recent_angles[-2]) == np.sign(self.recent_angles[-2] - self.recent_angles[-3])
+        change_direction_scalar = p_mean(change_direction, p=0.1)
+        
+        # Calculate final reward
+        reward = p_mean([movement_forward, change_direction_scalar, body_stability_scalar], p=-4.0)
+        
+        # Check termination conditions
+        terminated = self.is_fallen()
         truncated = False
-        info = {"forward": forward, "change_direction": change_direction_scalar, "body_stability": body_stability_scalar}
-        # Stop criteria of current learning episode: 
-        if self.is_fallen(): # Robot fell
-            terminated = True
-            truncated = False
-
-        self.observation = self._get_obs(action)
-
-        return (np.array(self.observation).astype(np.float32), 
-                        reward, terminated, truncated, info)
-
+        
+        info = {"forward": movement_forward, "change_direction": change_direction_scalar, "body_stability": body_stability_scalar}
+        
+        return observation, reward, terminated, truncated, info
 
     def reset(self, seed=None, options=None):
         self.step_counter = 0
-        self.arm_contact = 0
-        p.resetSimulation()
-        # Disable rendering during loading.
-        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING,0) 
-        p.setGravity(0,0,-9.81)
-        p.setAdditionalSearchPath(pybullet_data.getDataPath())
-        p.loadURDF("plane.urdf")
-
-        start_pos = [0,0,0.08]
-        start_orient = p.getQuaternionFromEuler([0,0,0])
-
-        urdf_path = pathlib.Path(__file__).parent.resolve() / "models/"
-        self.robot_id = p.loadURDF(str(urdf_path / "bittle_esp32.urdf"), 
-                                   start_pos, start_orient, 
-                                   flags=p.URDF_USE_SELF_COLLISION) 
-        
-        # Initialize urdf links and joints.
-        self.joint_ids = []
-        #paramIds = []
-        for j in range(p.getNumJoints(self.robot_id)):
-            joint_type = p.getJointInfo(self.robot_id, j)[2]
-
-            if (joint_type == p.JOINT_PRISMATIC 
-                or joint_type == p.JOINT_REVOLUTE):
-                self.joint_ids.append(j)
-                #paramIds.append(p.addUserDebugParameter(joint_name.decode("utf-8")))
-                # Limiting motor dynamics. Although bittle's dynamics seem to 
-                # be be quite high like up to 7 rad/s.
-                p.changeDynamics(self.robot_id, j, maxJointVelocity = np.pi*10) 
-        
-        # Setting start position. This influences training.
-        joint_angs = np.deg2rad(np.array([1, 0, 1, 0, 1, 0, 1, 0])*50) 
-
+        # reset robot position and orientation
+        p.resetBasePositionAndOrientation(self.robot_id, [0, 0, 0.08], p.getQuaternionFromEuler([0, 0, 0]))
+        p.resetBaseVelocity(self.robot_id, [0, 0, 0], [0, 0, 0])
+        # Set initial joint positions
+        initial_angles = np.deg2rad([50, 0, 50, 0, 50, 0, 50, 0])
         for i, joint_id in enumerate(self.joint_ids):
-            p.resetJointState(self.robot_id, joint_id, joint_angs[i])
-
-        # Initialize robot state history with reset position
-        state_joints = np.asarray(
-            p.getJointStates(self.robot_id, self.joint_ids), dtype=object)[:,0]
-        state_joints /= self.bound_ang 
+            p.resetJointState(self.robot_id, joint_id, initial_angles[i])
         
-        self.state_history = []
-        self.recent_angles = np.tile(state_joints, self.LENGTH_RECENT_ANGLES)
-        self.observation = self._get_obs(self.action_space.low*0.0)
-        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING,1)
+        # Initialize recent angles history
+        self.recent_angles = np.tile(initial_angles / self.BOUND_ANG, (self.LENGTH_RECENT_ANGLES, 1))
+        
+        observation = self._get_obs()
         info = {}
-        return np.array(self.observation).astype(np.float32), info
-
+        
+        return observation.astype(np.float32), info
 
     def render(self, mode='human'):
         pass
 
-
     def close(self):
         p.disconnect()
 
-
     def is_fallen(self):
-        """ Check if robot is fallen. It becomes "True", 
-            when pitch or roll is more than 1.3 rad.
-        """
-        pos, orient = p.getBasePositionAndOrientation(self.robot_id)
+        """Check if robot is fallen (pitch or roll > 1.3 rad)."""
+        _, orient = p.getBasePositionAndOrientation(self.robot_id)
         orient = p.getEulerFromQuaternion(orient)
-        is_fallen = (np.fabs(orient[0]) > 1.3 
-                    or np.fabs(orient[1]) > 1.3)
+        return abs(orient[0]) > 1.3 or abs(orient[1]) > 1.3
 
-        return is_fallen
-
-
-    def randomize(self, value, percentage):
-        """ Randomize value within percentage boundaries.
-        """
-        percentage /= 100
-        value_randomized = value * (1 + percentage*(2*np.random.rand()-1))
-
-        return value_randomized
-
-
+# Register the environment
 gym.register("Bittle-custom", OpenCatGymEnv)

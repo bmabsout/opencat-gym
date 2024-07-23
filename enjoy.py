@@ -12,11 +12,12 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("model", help="model to load")
 parser.add_argument("--stochastic", help="use stochastic policy", action="store_true")
+parser.add_argument("--observe_joints", action="store_true")
 args = parser.parse_args()
 # Create OpenCatGym environment from class
 print("load from:", args.model)
 parallel_env = 1
-env = make_vec_env(lambda **kwargs: TimeLimit(OpenCatGymEnv(**kwargs), max_episode_steps=400), n_envs=parallel_env, env_kwargs={"render_mode": "human"})
+env = make_vec_env(lambda **kwargs: TimeLimit(OpenCatGymEnv(**kwargs), max_episode_steps=400), n_envs=parallel_env, env_kwargs={"render_mode": "human", "observe_joints": args.observe_joints})
 # model = PPO.load("trained/trained_agent_PPO")
 model = PPO.load(args.model)
 

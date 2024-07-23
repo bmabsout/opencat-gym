@@ -5,14 +5,20 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from opencat_gym_env import OpenCatGymEnv
 from gymnasium.wrappers.time_limit import TimeLimit
 from stable_baselines3.common.callbacks import CheckpointCallback
+import argparse
 # Create OpenCatGym environment from class and check if structure is correct
 #env = OpenCatGymEnv()
 #check_env(env)
 
+
+
 if __name__ == "__main__":
     # Set up number of parallel environments
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--observe_joints", help="observe joint angles", action="store_true")
+    cmd_args = parser.parse_args()
     parallel_env = 8
-    env = make_vec_env(lambda: TimeLimit(OpenCatGymEnv(), max_episode_steps=400), 
+    env = make_vec_env(lambda: TimeLimit(OpenCatGymEnv(observe_joints=cmd_args.observe_joints), max_episode_steps=400), 
                        n_envs=parallel_env, 
                        vec_env_cls=SubprocVecEnv)
 
