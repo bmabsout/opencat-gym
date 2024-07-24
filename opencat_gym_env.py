@@ -96,7 +96,7 @@ class OpenCatGymEnv(gym.Env):
             self.robot_id, 
             self.joint_ids, 
             p.POSITION_CONTROL, 
-            new_joint_angs, 
+            np.deg2rad(new_joint_angs), 
             forces=np.ones(self.NUM_JOINTS)*0.2
         )
         return new_joint_angs / self.BOUND_ANG
@@ -146,9 +146,9 @@ class OpenCatGymEnv(gym.Env):
         p.resetBasePositionAndOrientation(self.robot_id, [0, 0, 0.08], p.getQuaternionFromEuler([0, 0, 0]))
         p.resetBaseVelocity(self.robot_id, [0, 0, 0], [0, 0, 0])
         # Set initial joint positions
-        initial_angles = np.deg2rad([50, 0, 50, 0, 50, 0, 50, 0])
+        initial_angles = np.array([50, 0, 50, 0, 50, 0, 50, 0])
         for i, joint_id in enumerate(self.joint_ids):
-            p.resetJointState(self.robot_id, joint_id, initial_angles[i])
+            p.resetJointState(self.robot_id, joint_id, np.deg2rad(initial_angles[i]))
         
         # Initialize recent angles history
         self.recent_angles = np.tile(initial_angles / self.BOUND_ANG, (self.LENGTH_RECENT_ANGLES, 1))
@@ -156,7 +156,7 @@ class OpenCatGymEnv(gym.Env):
         observation = self._get_obs()
         info = {}
         
-        return observation.astype(np.float32), info
+        return observation, info
 
     def render(self, mode='human'):
         pass
