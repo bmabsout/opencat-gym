@@ -18,15 +18,6 @@ class OpenCatGymEnv(gym.Env):
         self.observe_joints = observe_joints
         self.step_counter = 0
         
-        # Constants
-        self.BOUND_ANG = 110  # Joint maximum angle (degrees)
-        self.MAX_ANGLE_CHANGE = 11  # Maximum angle (degrees) delta per step
-        self.ANG_FACTOR = 0.1  # Improve angular velocity resolution before clip
-        self.LENGTH_RECENT_ANGLES = 3  # Buffer to read recent joint angles
-        
-        # Observation space size
-        self.SIZE_OBSERVATION = 3 + 3 + 1 + 3  # Linear vel, Angular vel, Time, Gravity Direction
-        self.TOTAL_OBSERVATION = self.SIZE_OBSERVATION + (self.LENGTH_RECENT_ANGLES * self.NUM_JOINTS if observe_joints else 0)
 
         # Set up PyBullet
         p.connect(p.GUI if render_mode == "human" else p.DIRECT)
@@ -48,10 +39,20 @@ class OpenCatGymEnv(gym.Env):
             return joint_type in (p.JOINT_PRISMATIC, p.JOINT_REVOLUTE)
 
         self.joint_ids = list(filter(is_relevant_joint, range(p.getNumJoints(self.robot_id))))
-        self.NUM_JOINTS = len(self.joint_ids)
         
         for j in self.joint_ids:
             p.changeDynamics(self.robot_id, j, maxJointVelocity=np.pi*10)
+
+        # Constants
+        self.BOUND_ANG = 110  # Joint maximum angle (degrees)
+        self.MAX_ANGLE_CHANGE = 11  # Maximum angle (degrees) delta per step
+        self.ANG_FACTOR = 0.1  # Improve angular velocity resolution before clip
+        self.LENGTH_RECENT_ANGLES = 3  # Buffer to read recent joint angles
+        
+        # Observation space size
+        self.SIZE_OBSERVATION = 3 + 3 + 1 + 3  # Linear vel, Angular vel, Time, Gravity Direction
+        self.NUM_JOINTS = len(self.joint_ids)
+        self.TOTAL_OBSERVATION = self.SIZE_OBSERVATION + (self.LENGTH_RECENT_ANGLES * self.NUM_JOINTS if observe_joints else 0)
 
         # Define action and observation spaces
         action_high = np.ones(self.NUM_JOINTS)
