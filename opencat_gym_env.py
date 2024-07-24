@@ -19,8 +19,8 @@ class OpenCatGymEnv(gym.Env):
         self.step_counter = 0
         
         # Constants
-        self.BOUND_ANG = np.deg2rad(110)  # Joint maximum angle (rad)
-        self.STEP_ANGLE = np.deg2rad(11)  # Maximum angle (rad) delta per step
+        self.BOUND_ANG = 110  # Joint maximum angle (degrees)
+        self.MAX_ANGLE_CHANGE = 11  # Maximum angle (degrees) delta per step
         self.ANG_FACTOR = 0.1  # Improve angular velocity resolution before clip
         self.LENGTH_RECENT_ANGLES = 3  # Buffer to read recent joint angles
         
@@ -72,46 +72,57 @@ class OpenCatGymEnv(gym.Env):
         gravity_direction = self.gravity_direction(self.robot_id)
         state_vel, state_angvel = map(np.asarray, p.getBaseVelocity(self.robot_id))
         state_vel = np.clip(state_vel, -1.0, 1.0)
-        state_angvel_clip = np.clip(state_angvel * self.ANG_FACTOR, -1.0, 1.0)
+        state_angvel_clip = np.clip(np.rad2deg(state_angvel) * self.ANG_FACTOR, -1.0, 1.0)
         time_obs = np.fmod(self.step_counter / 100.0, 1.0)
         
         obs = np.concatenate((state_vel, state_angvel_clip, gravity_direction, [time_obs]))
         
         if self.observe_joints:
-            obs = np.concatenate((obs, self.recent_angles.flatten() / self.BOUND_ANG))
+            obs = np.concatenate((obs, self.recent_angles.flatten()))
         
         return obs.astype(np.float32)
+
+    def get_joint_angs(self):
+        return np.rad2deg([ joint_state[0] for joint_state in p.getJointStates(self.robot_id, self.joint_ids) ])
+    
+    def control_motors(self, action):
+        joint_angs = self.get_joint_angs()
+        # Change per step including agent action
+        with_action = joint_angs + np.clip(action*self.BOUND_ANG - joint_angs, -1.0, 1.0) * self.MAX_ANGLE_CHANGE
+        # due to the low resolution of the real servos, we need to round the angles
+        low_resolution_angs = np.round(with_action)
+        new_joint_angs = np.clip(low_resolution_angs, -self.BOUND_ANG, self.BOUND_ANG)
+        p.setJointMotorControlArray(
+            self.robot_id, 
+            self.joint_ids, 
+            p.POSITION_CONTROL, 
+            new_joint_angs, 
+            forces=np.ones(self.NUM_JOINTS)*0.2
+        )
+        return new_joint_angs / self.BOUND_ANG
+
+    def add_joints_angles_to_history(self, joint_angles):
+        self.recent_angles = np.roll(self.recent_angles, -1, axis=0)
+        self.recent_angles[-1] = joint_angles
 
     def step(self, action):
         p.configureDebugVisualizer(p.COV_ENABLE_SINGLE_STEP_RENDERING)
         self.step_counter += 1
-        
-        # Get current position and joint angles
-        last_position = p.getBasePositionAndOrientation(self.robot_id)[0][0]
-        joint_angs = np.array([state[0] for state in p.getJointStates(self.robot_id, self.joint_ids)])
-        
-        # Update joint angles based on action
-        joint_angs += np.clip(action * self.BOUND_ANG - joint_angs, -1.0, 1.0) * self.STEP_ANGLE
-        joint_angs = np.clip(joint_angs, -self.BOUND_ANG, self.BOUND_ANG)
-        
-        # Round joint angles to integer degrees (as in OpenCat robot)
-        joint_angs = np.deg2rad(np.round(np.rad2deg(joint_angs)))
-        
+
+        normalized_joint_angs = self.control_motors(action)
+
+        # Update recent angles history
+        self.add_joints_angles_to_history(normalized_joint_angs)
+
         # get the observation before stepping the simulation because of communication delay
         observation = self._get_obs()
 
-        # Apply new joint angles
-        p.setJointMotorControlArray(self.robot_id, self.joint_ids, p.POSITION_CONTROL, joint_angs, forces=np.ones(self.NUM_JOINTS)*0.2)
-
+        last_position = p.getBasePositionAndOrientation(self.robot_id)[0][0]
         for _ in range(5): # 5 steps so the simulation runs at 240/5 = 48Hz, we cannot go faster as PWM is 50Hz
             p.stepSimulation() # runs at 240Hz, this is needed as pybullet is tuned for 240Hz operation
-        
-        # Update recent angles history
-        self.recent_angles = np.roll(self.recent_angles, -1, axis=0)
-        self.recent_angles[-1] = joint_angs / self.BOUND_ANG
+        current_position = p.getBasePositionAndOrientation(self.robot_id)[0][0]
         
         # Calculate reward components
-        current_position = p.getBasePositionAndOrientation(self.robot_id)[0][0]
         movement_forward = np.clip((current_position - last_position) * 300, 0.0, 1.0)
         body_stability = 1.0 - np.clip(np.asarray(p.getBaseVelocity(self.robot_id)[1]) * 0.2, 0.0, 1.0)
         body_stability_scalar = p_mean(body_stability, p=-1.0)
